@@ -53,13 +53,13 @@ async def fetch_latest_spin():
                 latest_spin = spins_data.get("spin-0")
 
                 if latest_spin:
-                    logger.info(f"Latest spin: {latest_spin}")
+                    logger.info("Latest spin: `%s`", latest_spin)
                     return latest_spin
 
                 logger.warning("No latest spin found in response.")
                 return None
 
-            logger.critical(f"Failed to fetch spin data: `{response.status}`")
+            logger.critical("Failed to fetch spin data: `%s`", response.status)
             return None
 
 
@@ -81,7 +81,9 @@ async def send_to_rabbitmq(spin_data):
         await exchange.publish(message, routing_key=RABBITMQ_ROUTING_KEY)
 
         logger.info(
-            f"Published spin data to RabbitMQ on `{RABBITMQ_EXCHANGE}` with key `{RABBITMQ_ROUTING_KEY}`."
+            "Published spin data to RabbitMQ on `%s` with key `%s`.",
+            RABBITMQ_EXCHANGE,
+            RABBITMQ_ROUTING_KEY,
         )
 
         await connection.close()
@@ -89,21 +91,53 @@ async def send_to_rabbitmq(spin_data):
         aio_pika.exceptions.AMQPConnectionError,
         aio_pika.exceptions.ChannelClosed,
     ) as e:
-        logger.critical(f"Error publishing to RabbitMQ: `{e}`")
+        logger.critical("Error publishing to RabbitMQ: `%s`", e)
 
 
 async def listen_to_sse():
-    """Listen to the SSE stream and trigger updates."""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(SSE_STREAM_URL) as response:
-            async for line in response.content:
-                if line:
-                    decoded_line = line.decode("utf-8").strip()
-                    if "Spin outdated - Update needed." in decoded_line:
-                        logger.debug("Received SSE update. Fetching latest spin...")
-                        spin_data = await fetch_latest_spin()
-                        if spin_data:
-                            await send_to_rabbitmq(spin_data)
+    """Listen to the SSE stream and trigger updates, with automatic reconnection."""
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(SSE_STREAM_URL) as response:
+                    if response.status != 200:
+                        logger.error(
+                            "Failed to connect to SSE stream, status: `%s`",
+                            response.status,
+                        )
+                        await asyncio.sleep(5)  # Wait before retrying
+                        continue
+
+                    logger.info("Connected to SSE stream successfully.")
+
+                    async for line in response.content:
+                        try:
+                            if line:
+                                decoded_line = line.decode("utf-8").strip()
+                                logger.debug("SSE received: `%s`", decoded_line)
+
+                                if "Spin outdated - Update needed." in decoded_line:
+                                    logger.info(
+                                        "Received spin update signal. Fetching latest spin..."
+                                    )
+                                    spin_data = await fetch_latest_spin()
+                                    if spin_data:
+                                        await send_to_rabbitmq(spin_data)
+                                    else:
+                                        logger.warning(
+                                            "No valid spin data received after SSE update."
+                                        )
+                        except (aiohttp.ClientError, json.JSONDecodeError) as e:
+                            logger.exception("Error processing SSE message: `%s`", e)
+                            continue  # Continue processing SSE messages
+
+        except aiohttp.ClientError as e:
+            logger.error("SSE connection error: `%s`", e)
+        except (aio_pika.exceptions.AMQPError, asyncio.TimeoutError) as e:
+            logger.critical("Unexpected error in SSE listener: `%s`", e)
+
+        logger.info("Reconnecting to SSE stream in 5 seconds...")
+        await asyncio.sleep(5)  # Delay before attempting reconnection
 
 
 async def main():
@@ -113,6 +147,7 @@ async def main():
     This function listens to the SSE stream and triggers updates
     when a new spin is available.
     """
+    logger.info("Starting WBOR Spinitron watchdog...")
     await listen_to_sse()
 
 
