@@ -101,7 +101,9 @@ async def listen_to_sse():
     while True:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(SSE_STREAM_URL) as response:
+                logger.info("About to get stream session...")
+                timeout = aiohttp.ClientTimeout(total=5)
+                async with session.get(SSE_STREAM_URL, timeout=timeout) as response:
                     logger.info("Attempting to connect to SSE stream...")
 
                     if response.status != 200:
@@ -143,6 +145,8 @@ async def listen_to_sse():
             logger.error("SSE connection error: `%s`", e)
         except (aio_pika.exceptions.AMQPError, asyncio.TimeoutError) as e:
             logger.critical("Unexpected error in SSE listener: `%s`", e)
+        except Exception as e:
+            logger.error("Unexpected exception: `%s`", e)
 
         logger.info("Reconnecting to SSE stream in 5 seconds...")
         await asyncio.sleep(5)  # Delay before attempting reconnection
