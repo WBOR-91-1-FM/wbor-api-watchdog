@@ -100,6 +100,8 @@ async def listen_to_sse():
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(SSE_STREAM_URL) as response:
+                    logger.info("Attempting to connect to SSE stream...")
+
                     if response.status != 200:
                         logger.error(
                             "Failed to connect to SSE stream, status: `%s`",
@@ -109,8 +111,12 @@ async def listen_to_sse():
                         continue
 
                     logger.info("Connected to SSE stream successfully.")
+                    logger.debug("Starting SSE message loop...")
 
+                    # Ensure response.content is not empty before processing
                     async for line in response.content:
+                        logger.debug("Received raw line: `%s`", line)
+
                         try:
                             if line:
                                 decoded_line = line.decode("utf-8").strip()
