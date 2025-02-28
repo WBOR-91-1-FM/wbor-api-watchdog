@@ -1,0 +1,3 @@
+aiohttp
+aio_pika
+python-dotenv
