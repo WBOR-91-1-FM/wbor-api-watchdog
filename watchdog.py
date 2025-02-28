@@ -40,6 +40,8 @@ API_BASE_URL = "https://api-1.wbor.org"
 
 SSE_STREAM_URL = f"{API_BASE_URL}/spins/stream"
 SPIN_GET_URL = f"{API_BASE_URL}/spins/get"
+logger.debug("SSE_STREAM_URL: `%s`", SSE_STREAM_URL)
+logger.debug("SPIN_GET_URL: `%s`", SPIN_GET_URL)
 
 
 async def fetch_latest_spin():
@@ -154,8 +156,19 @@ async def main():
     when a new spin is available.
     """
     logger.info("Starting WBOR Spinitron watchdog...")
-    await listen_to_sse()
+    try:
+        await listen_to_sse()
+    except Exception as e:
+        logger.critical("Unhandled exception in main: %s", e, exc_info=True)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("Shutdown requested.")
+    finally:
+        loop.close()
