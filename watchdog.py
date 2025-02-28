@@ -1,9 +1,30 @@
+"""
+Module to watch for updates in the WBOR Spinitron API relay and publish them to 
+RabbitMQ.
+
+This script listens to a Server-Sent Events (SSE) stream and fetches the latest 
+spin data. When a new spin is available, it publishes the data to a RabbitMQ 
+exchange.
+
+The RabbitMQ exchange, queue, and routing key are all configurable via environment
+variables.
+
+This script is intended to be run as a standalone service that is always running
+to keep the RabbitMQ queue up-to-date with the latest spins.
+"""
+
 import os
 import json
+import logging
 import asyncio
 import aiohttp
 import aio_pika
 from dotenv import load_dotenv
+
+from utils.logging import configure_logging
+
+logging.root.handlers = []
+logger = configure_logging()
 
 load_dotenv()
 
@@ -32,13 +53,13 @@ async def fetch_latest_spin():
                 latest_spin = spins_data.get("spin-0")
 
                 if latest_spin:
-                    print(f"Latest spin: {latest_spin}")
+                    logger.info(f"Latest spin: {latest_spin}")
                     return latest_spin
 
-                print("No latest spin found in response.")
+                logger.warning("No latest spin found in response.")
                 return None
 
-            print(f"Failed to fetch spin data: `{response.status}`")
+            logger.critical(f"Failed to fetch spin data: `{response.status}`")
             return None
 
 
@@ -59,7 +80,7 @@ async def send_to_rabbitmq(spin_data):
         message = aio_pika.Message(body=json.dumps(spin_data).encode("utf-8"))
         await exchange.publish(message, routing_key=RABBITMQ_ROUTING_KEY)
 
-        print(
+        logger.info(
             f"Published spin data to RabbitMQ on `{RABBITMQ_EXCHANGE}` with key `{RABBITMQ_ROUTING_KEY}`."
         )
 
@@ -68,7 +89,7 @@ async def send_to_rabbitmq(spin_data):
         aio_pika.exceptions.AMQPConnectionError,
         aio_pika.exceptions.ChannelClosed,
     ) as e:
-        print(f"Error publishing to RabbitMQ: `{e}`")
+        logger.critical(f"Error publishing to RabbitMQ: `{e}`")
 
 
 async def listen_to_sse():
@@ -79,7 +100,7 @@ async def listen_to_sse():
                 if line:
                     decoded_line = line.decode("utf-8").strip()
                     if "Spin outdated - Update needed." in decoded_line:
-                        print("Received SSE update. Fetching latest spin...")
+                        logger.debug("Received SSE update. Fetching latest spin...")
                         spin_data = await fetch_latest_spin()
                         if spin_data:
                             await send_to_rabbitmq(spin_data)

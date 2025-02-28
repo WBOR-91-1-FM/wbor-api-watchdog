@@ -1,3 +1,5 @@
 aiohttp
 aio_pika
 python-dotenv
+colorlog
+pytz
