@@ -1,9 +1,9 @@
 """
-Module to watch for updates in the WBOR Spinitron API relay and publish them to 
+Module to watch for updates in the WBOR Spinitron API relay and publish them to
 RabbitMQ.
 
-This script listens to a Server-Sent Events (SSE) stream and fetches the latest 
-spin data. When a new spin is available, it publishes the data to a RabbitMQ 
+This script listens to a Server-Sent Events (SSE) stream and fetches the latest
+spin data. When a new spin is available, it publishes the data to a RabbitMQ
 exchange.
 
 The RabbitMQ exchange, queue, and routing key are all configurable via environment
@@ -19,6 +19,7 @@ import logging
 import asyncio
 import aiohttp
 import aio_pika
+from aiosseclient import aiosseclient
 from dotenv import load_dotenv
 
 from utils.logging import configure_logging
@@ -38,8 +39,8 @@ RABBITMQ_ROUTING_KEY = os.getenv("RABBITMQ_ROUTING_KEY")
 
 API_BASE_URL = "https://api-1.wbor.org"
 
-SSE_STREAM_URL = f"{API_BASE_URL}/spins/stream"
-SPIN_GET_URL = f"{API_BASE_URL}/spins/get"
+SSE_STREAM_URL = f"{API_BASE_URL}/spin-events"
+SPIN_GET_URL = f"{API_BASE_URL}/api/spins"
 logger.debug("SSE_STREAM_URL: `%s`", SSE_STREAM_URL)
 logger.debug("SPIN_GET_URL: `%s`", SPIN_GET_URL)
 
@@ -51,18 +52,36 @@ async def fetch_latest_spin():
             if response.status == 200:
                 spins_data = await response.json()
 
-                # Directly fetch spin-0 as it is the latest
-                latest_spin = spins_data.get("spin-0")
-
+                # Directly fetch item 0 as it is the latest spin
+                items = spins_data.get("items")
+                latest_spin = items[0] or None
                 if latest_spin:
                     logger.info("Latest spin: `%s`", latest_spin)
                     return latest_spin
-
                 logger.warning("No latest spin found in response.")
                 return None
-
             logger.critical("Failed to fetch spin data: `%s`", response.status)
             return None
+
+
+async def listen_to_sse():
+    logger.info("Listening for SSE at: %s", SSE_STREAM_URL)
+
+    while True:
+        try:
+            async for event in aiosseclient(SSE_STREAM_URL):
+                # Check if we got the event that indicates a new spin
+                if event.data == "new spin data":
+                    logger.info("Received SSE: 'new spin data'")
+                    spin = await fetch_latest_spin()
+                    if spin is not None:
+                        await send_to_rabbitmq(spin)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error("SSE connection dropped or failed: %s", e)
+            await asyncio.sleep(5)  # Wait and retry
+        except Exception as e:
+            logger.critical("Unexpected error in SSE loop: %s", e, exc_info=True)
+            await asyncio.sleep(5)
 
 
 async def send_to_rabbitmq(spin_data):
@@ -94,62 +113,6 @@ async def send_to_rabbitmq(spin_data):
         aio_pika.exceptions.ChannelClosed,
     ) as e:
         logger.critical("Error publishing to RabbitMQ: `%s`", e)
-
-
-async def listen_to_sse():
-    """Listen to the SSE stream and trigger updates, with automatic reconnection."""
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                logger.info("About to get stream session...")
-                timeout = aiohttp.ClientTimeout(total=5)
-                async with session.get(SSE_STREAM_URL, timeout=timeout) as response:
-                    logger.info("Attempting to connect to SSE stream...")
-
-                    if response.status != 200:
-                        logger.error(
-                            "Failed to connect to SSE stream, status: `%s`",
-                            response.status,
-                        )
-                        await asyncio.sleep(5)  # Wait before retrying
-                        continue
-
-                    logger.info("Connected to SSE stream successfully.")
-                    logger.debug("Starting SSE message loop...")
-
-                    # Ensure response.content is not empty before processing
-                    async for line in response.content:
-                        logger.debug("Received raw line: `%s`", line)
-
-                        try:
-                            if line:
-                                decoded_line = line.decode("utf-8").strip()
-                                logger.debug("SSE received: `%s`", decoded_line)
-
-                                if "Spin outdated - Update needed." in decoded_line:
-                                    logger.info(
-                                        "Received spin update signal. Fetching latest spin..."
-                                    )
-                                    spin_data = await fetch_latest_spin()
-                                    if spin_data:
-                                        await send_to_rabbitmq(spin_data)
-                                    else:
-                                        logger.warning(
-                                            "No valid spin data received after SSE update."
-                                        )
-                        except (aiohttp.ClientError, json.JSONDecodeError) as e:
-                            logger.exception("Error processing SSE message: `%s`", e)
-                            continue  # Continue processing SSE messages
-
-        except aiohttp.ClientError as e:
-            logger.error("SSE connection error: `%s`", e)
-        except (aio_pika.exceptions.AMQPError, asyncio.TimeoutError) as e:
-            logger.critical("Unexpected error in SSE listener: `%s`", e)
-        except Exception as e:
-            logger.error("Unexpected exception: `%s`", e)
-
-        logger.info("Reconnecting to SSE stream in 5 seconds...")
-        await asyncio.sleep(5)  # Delay before attempting reconnection
 
 
 async def main():
