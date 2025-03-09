@@ -56,7 +56,7 @@ async def fetch_latest_spin():
                 items = spins_data.get("items")
                 latest_spin = items[0] or None
                 if latest_spin:
-                    logger.info("Latest spin: `%s`", latest_spin)
+                    logger.debug("Latest spin: `%s`", latest_spin)
                     return latest_spin
                 logger.warning("No latest spin found in response.")
                 return None
@@ -65,14 +65,20 @@ async def fetch_latest_spin():
 
 
 async def listen_to_sse():
-    logger.info("Listening for SSE at: %s", SSE_STREAM_URL)
+    """
+    Connect to the SSE stream and listen for new spin messages.
+
+    When a new spin message is received, fetch the latest spin data and
+    publish it to RabbitMQ.
+    """
+    logger.debug("Listening for SSE at: %s", SSE_STREAM_URL)
 
     while True:
         try:
             async for event in aiosseclient(SSE_STREAM_URL):
                 # Check if we got the event that indicates a new spin
                 if event.data == "new spin data":
-                    logger.info("Received SSE: 'new spin data'")
+                    logger.debug("Received SSE: 'new spin data'")
                     spin = await fetch_latest_spin()
                     if spin is not None:
                         await send_to_rabbitmq(spin)
@@ -102,9 +108,11 @@ async def send_to_rabbitmq(spin_data):
         await exchange.publish(message, routing_key=RABBITMQ_ROUTING_KEY)
 
         logger.info(
-            "Published spin data to RabbitMQ on `%s` with key `%s`.",
+            "Published spin data to RabbitMQ on `%s` with key `%s`: `%s - %s`",
             RABBITMQ_EXCHANGE,
             RABBITMQ_ROUTING_KEY,
+            spin_data.get("artist"),
+            spin_data.get("song"),
         )
 
         await connection.close()
