@@ -1,7 +1,7 @@
 IMAGE_NAME = wbor-api-watchdog-image
 CONTAINER_NAME = wbor-api-watchdog
 NETWORK_NAME = wbor-network
-HOST_DIR = "/Users/mdaugher/Projects/radio/wbor-api-watchdog"
+HOST_DIR = 
 
 # Default to podman, allow override with DOCKER_TOOL=docker or DOCKER_TOOL=podman
 DOCKER_TOOL ?= podman
