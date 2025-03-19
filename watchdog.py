@@ -6,15 +6,19 @@ This script listens to a Server-Sent Events (SSE) stream and fetches the latest
 spin data. When a new spin is available, it publishes the data to a RabbitMQ
 exchange.
 
-The RabbitMQ exchange, queue, and routing key are all configurable via environment
-variables.
+The RabbitMQ exchange, queue, and routing key are all configurable via
+environment variables.
 
 This script is intended to be run as a standalone service that is always running
 to keep the RabbitMQ queue up-to-date with the latest spins.
+
+Handles graceful shutdowns via SIGINT and SIGTERM.
 """
 
 import os
+import sys
 import json
+import signal
 import logging
 import asyncio
 import aiohttp
@@ -37,12 +41,39 @@ RABBITMQ_QUEUE = os.getenv("RABBITMQ_QUEUE")
 RABBITMQ_EXCHANGE = os.getenv("RABBITMQ_EXCHANGE")
 RABBITMQ_ROUTING_KEY = os.getenv("RABBITMQ_ROUTING_KEY")
 
-API_BASE_URL = "https://api-1.wbor.org"
-
+API_BASE_URL = os.getenv("API_BASE_URL")
 SSE_STREAM_URL = f"{API_BASE_URL}/spin-events"
 SPIN_GET_URL = f"{API_BASE_URL}/api/spins"
 logger.debug("SSE_STREAM_URL: `%s`", SSE_STREAM_URL)
 logger.debug("SPIN_GET_URL: `%s`", SPIN_GET_URL)
+
+if not all(
+    [
+        RABBITMQ_HOST,
+        RABBITMQ_USER,
+        RABBITMQ_PASS,
+        RABBITMQ_QUEUE,
+        RABBITMQ_EXCHANGE,
+        RABBITMQ_ROUTING_KEY,
+        API_BASE_URL,
+    ]
+):
+    logger.critical("Missing required environment variables.")
+    sys.exit(1)
+
+shutdown_event = asyncio.Event()
+
+
+def handle_shutdown(signum, _frame):
+    """
+    Handle shutdown signals (SIGINT, SIGTERM).
+    """
+    logger.info("Received shutdown signal: %s", signum)
+    shutdown_event.set()
+
+
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
 
 
 async def fetch_latest_spin():
@@ -73,19 +104,26 @@ async def listen_to_sse():
     """
     logger.debug("Listening for SSE at: %s", SSE_STREAM_URL)
 
-    while True:
+    while not shutdown_event.is_set():
         try:
             async for event in aiosseclient(SSE_STREAM_URL):
-                # Check if we got the event that indicates a new spin
+                if shutdown_event.is_set():
+                    logger.info("Shutting down SSE listener.")
+                    break
+
                 if event.data == "new spin data":
                     logger.debug("Received SSE: 'new spin data'")
                     spin = await fetch_latest_spin()
                     if spin is not None:
                         await send_to_rabbitmq(spin)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            if shutdown_event.is_set():
+                break
             logger.error("SSE connection dropped or failed: %s", e)
-            await asyncio.sleep(5)  # Wait and retry
+            await asyncio.sleep(5)
         except Exception as e:
+            if shutdown_event.is_set():
+                break
             logger.critical("Unexpected error in SSE loop: %s", e, exc_info=True)
             await asyncio.sleep(5)
 
@@ -131,10 +169,17 @@ async def main():
     when a new spin is available.
     """
     logger.info("Starting WBOR Spinitron watchdog...")
+
     try:
         await listen_to_sse()
-    except Exception as e:
+    except (
+        aiohttp.ClientError,
+        asyncio.TimeoutError,
+        aio_pika.exceptions.AMQPError,
+    ) as e:
         logger.critical("Unhandled exception in main: %s", e, exc_info=True)
+    finally:
+        logger.info("Shutdown complete.")
 
 
 if __name__ == "__main__":
@@ -146,4 +191,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Shutdown requested.")
     finally:
+        shutdown_event.set()
+        loop.run_until_complete(asyncio.sleep(0.1))  # Allow cleanup tasks
         loop.close()

@@ -1,10 +1,10 @@
 IMAGE_NAME = wbor-api-watchdog-image
 CONTAINER_NAME = wbor-api-watchdog
 NETWORK_NAME = wbor-network
-HOST_DIR = 
+HOST_DIR =
 
-# Default to podman, allow override with DOCKER_TOOL=docker or DOCKER_TOOL=podman
-DOCKER_TOOL ?= podman
+# Default to Docker, allow override with DOCKER_TOOL=podman
+DOCKER_TOOL ?= docker
 
 default: clean build run logsf
 
