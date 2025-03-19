@@ -18,6 +18,7 @@ Handles graceful shutdowns via SIGINT and SIGTERM.
 import os
 import sys
 import json
+import time
 import signal
 import logging
 import asyncio
@@ -46,6 +47,8 @@ SSE_STREAM_URL = f"{API_BASE_URL}/spin-events"
 SPIN_GET_URL = f"{API_BASE_URL}/api/spins"
 logger.debug("SSE_STREAM_URL: `%s`", SSE_STREAM_URL)
 logger.debug("SPIN_GET_URL: `%s`", SPIN_GET_URL)
+
+NEW_SPIN_EVENT = "new spin data"
 
 if not all(
     [
@@ -76,6 +79,19 @@ signal.signal(signal.SIGINT, handle_shutdown)
 signal.signal(signal.SIGTERM, handle_shutdown)
 
 
+async def sse_is_reachable():
+    """
+    Simple helper function to check if the SSE endpoint is responding.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(SSE_STREAM_URL, timeout=5) as response:
+                return response.status == 200
+    except Exception as e:
+        logger.debug("SSE reachability check failed: %s", e)
+        return False
+
+
 async def fetch_latest_spin():
     """Fetch the latest spin from the API."""
     async with aiohttp.ClientSession() as session:
@@ -85,11 +101,11 @@ async def fetch_latest_spin():
 
                 # Directly fetch item 0 as it is the latest spin
                 items = spins_data.get("items")
-                latest_spin = items[0] or None
-                if latest_spin:
+                if items:
+                    latest_spin = items[0]
                     logger.debug("Latest spin: `%s`", latest_spin)
                     return latest_spin
-                logger.warning("No latest spin found in response.")
+                logger.warning("No spins found in response.")
                 return None
             logger.critical("Failed to fetch spin data: `%s`", response.status)
             return None
@@ -104,28 +120,79 @@ async def listen_to_sse():
     """
     logger.debug("Listening for SSE at: %s", SSE_STREAM_URL)
 
+    # We'll use a loop to reconnect if SSE fails
     while not shutdown_event.is_set():
+        retry_count = 0
         try:
             async for event in aiosseclient(SSE_STREAM_URL):
                 if shutdown_event.is_set():
                     logger.info("Shutting down SSE listener.")
                     break
 
-                if event.data == "new spin data":
-                    logger.debug("Received SSE: 'new spin data'")
+                if event.data == NEW_SPIN_EVENT:
+                    logger.debug("Received SSE event: `%s`", event.data)
                     spin = await fetch_latest_spin()
                     if spin is not None:
                         await send_to_rabbitmq(spin)
+
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             if shutdown_event.is_set():
                 break
+            retry_count += 1
+            if retry_count > 5:
+                logger.error("SSE attempts exceeded 5, switching to polling fallback.")
+                await poll_for_spins()
+                return
             logger.error("SSE connection dropped or failed: %s", e)
             await asyncio.sleep(5)
+
         except Exception as e:
             if shutdown_event.is_set():
                 break
             logger.critical("Unexpected error in SSE loop: %s", e, exc_info=True)
             await asyncio.sleep(5)
+
+
+async def poll_for_spins(poll_interval=3, retry_sse_interval=300):
+    """
+    Poll for new spins at a fixed interval. Periodically check if SSE is
+    available again, and if so, return to allow the SSE listener to resume.
+
+    Parameters:
+    - poll_interval: Interval in seconds to poll for new spins.
+    - retry_sse_interval: Interval in seconds to check if SSE is available again
+    and return to SSE if it is.
+    """
+    logger.info("Polling for new spins as a fallback...")
+    last_spin_id = None
+    time_of_last_sse_check = time.time()
+
+    while not shutdown_event.is_set():
+        try:
+            # Poll for a new spin
+            current_spin = await fetch_latest_spin()
+            if current_spin is not None:
+                spin_id = current_spin.get("id")
+                if spin_id != last_spin_id:
+                    last_spin_id = spin_id
+                    await send_to_rabbitmq(current_spin)
+
+            # Periodically attempt to see if SSE is available
+            if time.time() - time_of_last_sse_check >= retry_sse_interval:
+                time_of_last_sse_check = time.time()
+                if await sse_is_reachable():
+                    logger.info("SSE appears available again. Returning to SSE.")
+                    return
+
+            await asyncio.sleep(poll_interval)
+
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            aio_pika.exceptions.AMQPError,
+        ) as e:
+            logger.error("Error during polling: %s", e, exc_info=True)
+            await asyncio.sleep(poll_interval)
 
 
 async def send_to_rabbitmq(spin_data):
@@ -165,8 +232,9 @@ async def main():
     """
     Entry point for the script.
 
-    This function listens to the SSE stream and triggers updates
-    when a new spin is available.
+    This function listens to the SSE stream and triggers updates when a new spin
+    is available. If SSE fails repeatedly, it falls back to polling, which can
+    return to SSE if it becomes available again.
     """
     logger.info("Starting WBOR Spinitron watchdog...")
 
